@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script src="utility.js"></script>
+</head>
+<body>
+    <script id="vertex_shader" type="x-shader/x-vertex">
+        #version 300 es
+        precision highp float;
+        precision highp int;
+        // We'll have to reuse these locations handle numbers
+        // outside of the shader when we pass data to it.
+        // See 'var vertexTexLocation = 4;' below for example.
+        layout(location = 0) in vec2 position;
+        layout(location = 4) in vec2 texture_coordinates;
+        out vec2 v_st;
+        void main() {
+            v_st = texture_coordinates;
+            // we're using orthogonal projection, no need for
+            // perspective. so, we don't even need a model-view
+            // -projection matrix to multiply the position
+            // coordinates by like in standard opengl or 3d
+            // workflows where we're looking at a 3d scene.
+            gl_Position = vec4(position, 0.0, 1.0);
+        }
+    </script>
+
+    <script id="fragment_shader" type="x-shader/x-fragment">
+        #version 300 es
+
+        #define TEST 0
+        #define SHARPEN 1
+        #define GAUSSIAN 2
+        #define BOX 3
+        #define EMBOSS 4
+
+        precision highp float;
+        precision highp int;
+
+        uniform sampler2D diffuse;
+        uniform int convolution_matrix_type;
+
+        in vec2 v_st;
+        layout(location = 0) out vec4 colour;
+
+        void main() {
+
+            float convolution_matrix[9];
+
+            if (SHARPEN == convolution_matrix_type) {
+                convolution_matrix = float[9](
+                    0.0, -1.0, 0.0,
+                    -1.0, 5.0, -1.0,
+                    0.0, -1.0, 0.0
+                );
+            } else if (GAUSSIAN == convolution_matrix_type) {
+                convolution_matrix = float[9](
+                    0.0625, 0.125, 0.0625,
+                    0.125, 0.25, 0.125,
+                    0.0625, 0.125, 0.0625
+                );
+            } else if (BOX == convolution_matrix_type) {
+                convolution_matrix = float[9](
+                    0.11111, 0.11111, 0.11111,
+                    0.11111, 0.11111, 0.11111,
+                    0.11111, 0.11111, 0.11111
+                );
+            } else if (EMBOSS == convolution_matrix_type) {
+                convolution_matrix = float[9](
+                    -2.0, -1.0, 0.0,
+                    -1.0, 1.0, 1.0,
+                    0.0, 1.0, 2.0
+                );
+            } else {
+                // use identity
+                convolution_matrix = float[9](
+                    1.0, 1.0, 1.0,
+                    1.0, 1.0, 1.0,
+                    1.0, 1.0, 1.0
+                );
+            }
+            // upres the size by 2 (* 2) for better sampling results.
+            ivec2 size = textureSize(diffuse, 1) * 2; 
+            vec2 offset = vec2(1.0/float(size.x), 1.0/float(size.y));
+            // 'seeing doubles'
+            // offset.x *= 10.0;
+            // offset.y = 0.0;
+
+            // sample surrounding fragments.
+            vec4 pixels[9] = vec4[9](
+                // top left
+                texture(diffuse, vec2(v_st.s - offset.x, v_st.t - offset.y)),
+                // top
+                texture(diffuse, vec2(v_st.s, v_st.t - offset.y)),
+                // top right
+                texture(diffuse, vec2(v_st.s - offset.x, v_st.t + offset.y)),
+                // left
+                texture(diffuse, vec2(v_st.s - offset.x, v_st.t)),
+                // centre
+                texture(diffuse, v_st),
+                // right
+                texture(diffuse, vec2(v_st.s + offset.x, v_st.t)),
+                // bottom left
+                texture(diffuse, vec2(v_st.s - offset.x, v_st.t + offset.y)),
+                // bottom
+                texture(diffuse, vec2(v_st.s, v_st.t + offset.y)),
+                // bottom right
+                texture(diffuse, vec2(v_st.s + offset.x, v_st.t + offset.y))
+            );
+
+            colour = vec4(0.0, 0.0, 0.0, 1.0);
+
+            for (int i = 0; i < convolution_matrix.length(); i++) {
+                // for each fragment sampled around the current fragment,
+                // convolve it with the convolution_matrix's value.
+                colour += pixels[i] * convolution_matrix[i];
+            }
+
+            // if we want to test that the convolution_matrix_type
+            // is being successfully passed into the shader, we can
+            // just uncomment this and expect the colour output
+            // to be blue.
+            if (TEST == convolution_matrix_type) {
+                colour = vec4(0, 0, 1.0, 1.0);
+            }
+        }
+    </script>
+
+    <script>
+        'use strict';
+
+        // an enum of types of filters that our fragment 
+        // shader will understand.
+        var FILTER_TYPES = {
+            TEST: 0,
+            SHARPEN: 1,
+            GAUSSIAN: 2,
+            BOX: 3,
+            EMBOSS: 4,
+            REACTION_DIFFUSION: 5,
+            COUNT: 6
+        };
+
+        // how many times to apply the filter.
+        var ITERATIONS = 0;
+        var FILTER = 0;
+
+        var canvas = null;
+        var gl = null;
+        var program = null;
+        var framebufferTextures = [];
+        var framebuffers = [];
+
+        function createTexture(image) {
+            var texture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.texImage2D(
+                gl.TEXTURE_2D,
+                0,
+                gl.RGBA,
+                gl.RGBA,
+                gl.UNSIGNED_BYTE,
+                image
+            );
+            setupBoundTexture();
+            return texture;
+        }
+
+        function createFramebufferTexture() {
+            var texture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.texImage2D(
+                gl.TEXTURE_2D, 
+                0, 
+                gl.RGBA, 
+                image.naturalWidth, 
+                image.naturalHeight, 
+                0,
+                gl.RGBA, 
+                gl.UNSIGNED_BYTE, 
+                null
+            );
+            setupBoundTexture();
+            return texture;
+        }
+
+        function setupBoundTexture() {
+            // we'll apply these parameters to whichever
+            // texture is currently bound to the context.
+            // i noticed that not doing generateMipMap
+            // causes some problems, but i don't remember
+            // why it's important.
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+            gl.generateMipmap(gl.TEXTURE_2D);
+        }
+
+        function createFramebuffer(texture) {
+            var fb = gl.createFramebuffer();
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+
+            // attach a texture to it.
+            gl.framebufferTexture2D(
+                gl.FRAMEBUFFER, 
+                gl.COLOR_ATTACHMENT0, 
+                gl.TEXTURE_2D, 
+                texture, 
+                0
+            );
+            return fb;
+        }
+
+        function setupFramebuffers() {
+            // so initially the idea was to accomplish multiple
+            // iterations of a filter by: rendering to canvas,
+            // taking the output in the canvas, using it as a texture
+            // and then rendering again. aka keep sampling the last
+            // output as the input for our next filter.
+            // instead, we're using 2 render targets (framebuffers)
+            // backed by textures. i realize now why we need to do
+            // this (probably?) based on this excerpt from Lengyel's
+            // "Mathematics for 3D Game Programming...", page 1:
+            //
+            // "The usual modern 3D graphics board possesses a dedicated
+            // Graphics Processing Unit (GPU) that executes instructions
+            // independently of the Central Processing Unit (CPU). The CPU
+            // sends rendering commands to the GPU, which then performs 
+            // the rendering operations while the CPU continues with other
+            // tasks. This is called asynchronous operation. When geometrical
+            // information is submit- ted to a rendering library such as 
+            // OpenGL, the function calls used to request the rendering
+            // operations typically return a significant amount of time
+            // before the GPU has finished rendering the graphics."
+            //
+            // it looks like we might be still rendering (due to the 
+            // asynchronous nature described above) by the time we try 
+            // and sample the render's output to the canvas to use for 
+            // our next render. if we wanted to do that, we'd have to
+            // ensure synchronization.
+
+            for (var i = 0; i < 2; ++i) {
+                var texture = createFramebufferTexture();
+                framebufferTextures.push(texture);
+                var framebuffer = createFramebuffer(texture);
+                framebuffers.push(framebuffer);
+            }
+        }
+
+        function ready(image) {
+            // setup some globally used stuff, like the canvas, the webgl 
+            // ctx and the shader to render our geometry.
+            var filters = [
+                { id: 'abcd', f: FILTER_TYPES.SHARPEN, iters: 2 },
+                { id: 'efgh', f: FILTER_TYPES.GAUSSIAN, iters: 4 },
+                { id: 'zzzz', f: FILTER_TYPES.BOX, iters: 8 },
+                // this is an alternating pattern of sharpen/blur
+                // the loop will grab the right convolution function
+                // based on the id. pretty lame, i know. could be
+                // replaced with a function that calls blur/diffuse
+                // based on the current iteration?
+                { id: 'reaction-diffusion', f: FILTER_TYPES.REACTION_DIFFUSION, iters: 128 },
+                { id: 'convolveEmboss', f: FILTER_TYPES.EMBOSS, iters: 2 },
+            ];
+
+            filters.forEach(function(filter) {
+                FILTER = filter.f;
+                ITERATIONS = filter.iters;
+                canvas = document.createElement('canvas');
+                canvas.id = filter.id;
+                document.body.appendChild(canvas);
+                canvas.width = image.naturalWidth;
+                canvas.height = image.naturalHeight;
+                setupRender(image);
+            });
+        }
+
+        function setupRender(image) {
+    
+            gl = canvas.getContext('webgl2', { 
+                antialias: false,
+                preserveDrawingBuffer: true,
+            });
+            // this is our shader.
+            program = createProgram(gl, getShaderSource('vertex_shader'), getShaderSource('fragment_shader'));
+
+            // start setting up geometry, texture coords, etc.
+            var vertexPosBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, vertexPosBuffer);
+            // two triangles so we have some geometry to draw with
+            // in our opengl context.
+            var positions = new Float32Array([
+                -1.0, -1.0,
+                 1.0, -1.0,
+                 1.0,  1.0,
+                 1.0,  1.0,
+                -1.0,  1.0,
+                -1.0, -1.0
+            ]);
+            gl.bufferData(gl.ARRAY_BUFFER, positions, gl.DYNAMIC_DRAW);
+            gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+            var vertexTexBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, vertexTexBuffer);
+            // the texture coordinates for our triangles' vertex
+            // positions above.
+            var texcoords = new Float32Array([
+                 0.0,  1.0,
+                 1.0,  1.0,
+                 1.0,  0.0,
+                 1.0,  0.0,
+                 0.0,  0.0,
+                 0.0,  1.0
+            ]);
+            gl.bufferData(gl.ARRAY_BUFFER, texcoords, gl.DYNAMIC_DRAW);
+            gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+            var vertexArray = gl.createVertexArray();
+            gl.bindVertexArray(vertexArray);
+
+            // set with GLSL layout qualifier
+            // see the vertex shader above for how
+            // this was defined.
+            var vertexPosLocation = 0;
+            gl.bindBuffer(gl.ARRAY_BUFFER, vertexPosBuffer);
+            gl.vertexAttribPointer(vertexPosLocation, 2, gl.FLOAT, false, 0, 0);
+            gl.enableVertexAttribArray(vertexPosLocation);
+            gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+            // set with GLSL layout qualifier
+            // see the vertex shader above for how
+            // this was defined.
+            var vertexTexLocation = 4; 
+            gl.bindBuffer(gl.ARRAY_BUFFER, vertexTexBuffer);
+            gl.vertexAttribPointer(vertexTexLocation, 2, gl.FLOAT, false, 0, 0);
+            gl.enableVertexAttribArray(vertexTexLocation);
+            gl.bindBuffer(gl.ARRAY_BUFFER, null);
+            gl.bindVertexArray(null);
+
+            // setup our offscreen framebuffers and textures
+            // to draw other steps of our filters to.
+            setupFramebuffers();
+
+            // draw the geometry we've made to the webgl context in
+            // this render function. we only do 1 render.
+            var texture = createTexture(image);
+
+            // rebind our vertex array so we can reuse it for
+            // for every subsequent render. we used to do this
+            // in the render() function itself, but it isn't
+            // needed as long as we bind it at the right time.
+            gl.bindVertexArray(vertexArray);
+
+            render(texture, ITERATIONS);
+
+            framebuffers.forEach(function(fb) {
+                gl.deleteFramebuffer(fb);
+            });
+            framebufferTextures.forEach(function(fb) {
+                gl.deleteTexture(fb);
+            });
+            gl.deleteBuffer(vertexPosBuffer);
+            gl.deleteBuffer(vertexTexBuffer);
+            gl.deleteVertexArray(vertexArray);
+            gl.deleteTexture(texture);
+            gl.deleteProgram(program);
+
+            framebufferTextures = [];
+            framebuffers = [];
+        }
+
+        function render(texture, iterations) {
+
+            // bind the shader program
+            gl.useProgram(program);
+
+            if (0 === iterations) {
+                // draw back to webGL dom canvas.
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            } else {
+                // draw to one of the framebuffers, we'll begin with that
+                // step unless iterations are 0.
+                gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffers[iterations % 2]);
+            }
+
+            var uniformDiffuseLocation = gl.getUniformLocation(program, "diffuse");
+            gl.uniform1i(uniformDiffuseLocation, 0);
+
+            // i'm adding this so we can use some kind of enum
+            // (integer) to decide which convolution matrix we'll
+            // use once we hit the fragment shader. basically
+            // we're querying the fragment shader (which is now part
+            // of the compiled shader program) for the location of
+            // our enum's location. the function should return an
+            // integer indicating the uniform's layout position.
+            var uniformConvolutionMatrixTypeLocation = gl.getUniformLocation(program, "convolution_matrix_type")
+
+            // now we can pass in the integer to the shader so it
+            // can decide which convolution matrix to use. we also
+            // apply the special case for reaction-diffusion (alternating
+            // GAUSSIAN/SHARPEN)
+            if (FILTER_TYPES.REACTION_DIFFUSION === FILTER) {
+                gl.uniform1i(uniformConvolutionMatrixTypeLocation, 
+                    iterations % 2 === 0 ? FILTER_TYPES.GAUSSIAN : FILTER_TYPES.SHARPEN);
+                console.log(iterations % 2 === 0 ? "gaussian" : "sharpen");
+            } else {
+                gl.uniform1i(uniformConvolutionMatrixTypeLocation, FILTER);
+            }
+            
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+
+            gl.viewport(0, 0, image.naturalWidth, image.naturalHeight);
+
+            // clear and then draw.
+            gl.clearColor(iterations ? iterations / 5 : 0, 0.0, 0.0, 1.0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, 1);
+
+            if (iterations) {
+                // use the texture we just drew to to render to
+                // the alternate framebuffer on the next render
+                // call.
+                // like this dude: https://webglfundamentals.org/webgl/lessons/webgl-image-processing-continued.html
+                // we're ping-ponging between using a framebuffer
+                // as a location to draw to, and using whatever we
+                // drew to it as a texture.
+                var textureNext = framebufferTextures[iterations % 2];
+                render(textureNext, --iterations);
+            }
+        }
+
+        var image = new Image();
+        image.onload = function() {
+            ready(image);
+        }
+        // image.src = '../assets/leaf.jpg';
+        image.src = '../assets/everest.jpg';
+        // image.src = '../assets/valve.png';
+
+    </script>
+
+</body>
+
+</html>

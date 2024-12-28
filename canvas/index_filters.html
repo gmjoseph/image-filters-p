@@ -1,0 +1,273 @@
+<html>
+<head>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+
+var imgWidth;
+var imgHeight;
+
+function getColour(data, idx) {
+    var c = data[idx];
+    return c;
+}
+
+function setColour(data, idx, colour) {
+    data[idx] = colour;
+}
+
+// img: what we draw on load.
+function drawImg(img) {
+    var canvas = document.getElementById('canvas');
+    var ctx = canvas.getContext('2d');
+    canvas.width = imgWidth;
+    canvas.height = imgHeight;   
+    ctx.drawImage(img, 0, 0);
+}
+
+// return imgData from the 'canvas' id'd element
+function getImgData() {
+    var canvas = document.getElementById('canvas');
+    var ctx = canvas.getContext('2d');
+    var imgData = ctx.getImageData(0, 0, imgWidth, imgHeight);
+    return imgData
+}
+
+function makeFilterCanvas(id) {
+    var output = document.createElement('canvas');
+    output.id = id;
+    document.body.append(output);
+
+    output.width = imgWidth;
+    output.height = imgHeight;
+    return output
+}
+
+// id: retrieve the canvas we make in makeFilterCanvas
+// convolutionFunction: a function to convolve
+// inputData: image pixels
+// iterations: number of recursions to do.
+function drawFilter(id, convolutionFunction, inputData, iterations) {
+    if (!iterations) {
+        return;
+    }
+
+    if ('reaction-diffusion' === id) {
+        convolutionFunction = (0 === iterations % 2 ? convolveGaussian : convolveSharpen);
+    }
+
+    var output = document.getElementById(id);
+    var outputCtx = output.getContext('2d');
+    var outputData = outputCtx.getImageData(0, 0, imgWidth, imgHeight);
+
+    // accounting for alpha means width * rbga datapoints per row
+    var stepsPerRow = imgWidth * 4;
+
+    // allows us to reuse data if we want to recurse.
+
+    // this iterates row-wise (so we'll deal with x-convolution).
+    // this is how we're indexing into the data:
+    // [0R][0G][0B][0A][1R][1G][1B][1A][2R][2G][2B][2A]
+    for (var i = 0; i < inputData.data.length; i += 4) {
+        for (var j = 0; j < 4; j++) {
+            // we're convolving the alpha pixels too but since
+            // they're all 255 we should get 255 back.
+            // otherwise make this j < 3 and set i + 3
+            // to 255 outside the loop.
+            var convolved = convolvedMatrix(inputData.data, i + j, stepsPerRow, imgHeight);
+            var result = convolutionFunction(convolved);
+            setColour(outputData.data, i + j, result);
+        }
+    }
+    outputCtx.putImageData(outputData, 0, 0);
+
+    drawFilter(id, convolutionFunction, outputData, --iterations);
+}
+
+function ready(img) {
+    imgWidth = img.naturalWidth;
+    imgHeight = img.naturalHeight;
+
+    drawImg(img);
+
+    var filters = [
+        { id: 'abcd', f: convolveSharpen, iters: 2 },
+        { id: 'efgh', f: convolveGaussian, iters: 4 },
+        { id: 'zzzz', f: convolveBox, iters: 8 },
+        // this is an alternating pattern of sharpen/blur
+        // the loop will grab the right convolution function
+        // based on the id. pretty lame, i know. could be
+        // replaced with a function that calls blur/diffuse
+        // based on the current iteration?
+        { id: 'reaction-diffusion', f: null, iters: 32 },
+        { id: 'convolveEmboss', f: convolveEmboss, iters: 2 },
+    ];
+
+    var inputData = getImgData();
+    
+
+    for (var i = 0; i < filters.length; i++) {
+        var id = filters[i].id;
+        var f = filters[i].f
+        var iterations = filters[i].iters;
+        makeFilterCanvas(id);
+        drawFilter(id, f, inputData, iterations);
+    }
+}
+
+function convolvedMatrix(data, idx, stepsPerRow, height) {
+    var isLeft = 0 === idx % stepsPerRow;
+    var isTop = idx < stepsPerRow;
+    // because we jump an additional 4 to get to
+    // the next row when we're at the righthandmost pixel.
+    var isRight = stepsPerRow - 4 === idx % stepsPerRow;
+    // height - 1 let's us target the last row of the image.
+    var isBottom = idx >= stepsPerRow * (height - 4);
+
+    // we need to apply an extension strategy to edge pixels:
+    // https://en.wikipedia.org/wiki/Kernel_(image_processing)#Edge_Handling
+
+    // we use row-major ordering
+    var m = new Array(9);
+    var isCorner = ((isLeft && isTop) ||
+                    (isLeft && isBottom) ||
+                    (isRight && isTop) ||
+                    (isRight && isBottom))
+    var colour = getColour(data, idx)
+
+    // top + bottom jump an entire row back/forward.
+    var idxMapping = {
+        top: idx - stepsPerRow, 
+        right: idx + 4,
+        bottom: idx + stepsPerRow,
+        left: idx - 4,
+        topRight: (idx - stepsPerRow) + 4, 
+        bottomRight: (idx + stepsPerRow) + 4,
+        bottomLeft: (idx + stepsPerRow) - 4,
+        topLeft: (idx - stepsPerRow) - 4, 
+    };
+
+    // if its in a corner, just stretch out the value
+    // of the pixel in all directions. otherwise we can
+    // stretch out other edge pixels in the direction
+    // that isn't contained within the image.
+    // see the edge handling link on wikipedia above.
+    if (isCorner) {
+        // we have no other pixels to draw on in these cases
+        // so we can populate them with the same colour from
+        // the corner pixel.
+        // console.log("corner", idx);
+        m.fill(colour);
+    } else if (isLeft) {
+        // console.log("left ", idx);
+        m[0] = m[1] = m[2] = getColour(data, idxMapping.top);
+        m[3] = m[4] = m[5] = colour;
+        m[6] = m[7] = m[8] = getColour(data, idxMapping.bottom);
+    } else if (isTop) {
+        // console.log("top", idx);
+        m[0] = m[3] = m[6] = getColour(data, idxMapping.left);
+        m[1] = m[4] = m[7] = colour;
+        m[2] = m[5] = m[8] = getColour(data, idxMapping.right);
+    } else if (isRight) {
+        // console.log("right ", idx);
+        m[0] = m[1] = m[2] = getColour(data, idxMapping.top);
+        m[3] = m[4] = m[5] = colour;
+        m[6] = m[7] = m[8] = getColour(data, idxMapping.bottom);
+    } else if (isBottom) {
+        // console.log("bottom", idx);
+        m[0] = m[3] = m[6] = getColour(data, idxMapping.left);
+        m[1] = m[4] = m[7] = colour;
+        m[2] = m[5] = m[8] = getColour(data, idxMapping.right);
+    } else {
+        m[0] = getColour(data, idxMapping.topLeft);
+        m[1] = getColour(data, idxMapping.top);
+        m[2] = getColour(data, idxMapping.topRight);
+        m[3] = getColour(data, idxMapping.left);
+        m[4] = colour;
+        m[5] = getColour(data, idxMapping.right);
+        m[6] = getColour(data, idxMapping.bottomLeft);
+        m[7] = getColour(data, idxMapping.bottom);
+        m[8] = getColour(data, idxMapping.bottomRight);
+    }
+    return m;
+}
+
+function convolveSharpen(matrix) {
+    // https://en.wikipedia.org/wiki/Kernel_(image_processing)#Details
+    var g = [
+        0, -1, 0,
+        -1, 5, -1,
+        0, -1, 0,
+    ];
+    var a = 0;
+    for (var i = 0; i < g.length; i++) {
+        // var value = g[(g.length - 1) - i];
+        var value = g[i];
+        a += (value * matrix[i]);
+    }
+    return a;
+}
+
+function convolveGaussian(matrix) {
+    // https://en.wikipedia.org/wiki/Kernel_(image_processing)#Details
+    var g = [
+        1, 2, 1,
+        2, 4, 2,
+        1, 2, 1,
+    ];
+    var a = 0;
+    var fraction = 0.0625;
+    for (var i = 0; i < g.length; i++) {
+        // var value = g[(g.length - 1) - i]
+        var value = g[i];
+        a += (value * matrix[i]) * fraction;
+    }
+    return a;
+}
+
+function convolveBox(matrix) {
+    // https://en.wikipedia.org/wiki/Kernel_(image_processing)#Details
+    var g = [
+        1, 1, 1,
+        1, 1, 1,
+        1, 1, 1,
+    ];
+    var a = 0;
+    var fraction = 1/9;
+    for (var i = 0; i < g.length; i++) {
+        // var value = g[(g.length - 1) - i]
+        var value = g[i];
+        a += (value * matrix[i]) * fraction;
+    }
+    return a;
+}
+
+function convolveEmboss(matrix) {
+    // http://matlabtricks.com/post-5/3x3-convolution-kernels-with-online-demo#demo
+    var g = [
+        -2, -1, 0,
+        -1, 1, 1,
+        0, 1, 2,
+    ];
+    var a = 0;
+    for (var i = 0; i < g.length; i++) {
+        // var value = g[(g.length - 1) - i];
+        var value = g[i];
+        a += (value * matrix[i]);
+    }
+    return a;
+}
+
+var img = new Image();
+img.onload = function() {
+    ready(img);
+};
+
+// img.src = '../images/leaf.jpg';
+img.src = '../images/everest.jpg';
+// img.src = '../images/valve.png';
+
+</script>
+</body>
+</html>

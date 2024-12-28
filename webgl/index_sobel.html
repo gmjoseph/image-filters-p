@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script src="utility.js"></script>
+</head>
+<body>
+    <script id="vertex_shader" type="x-shader/x-vertex">
+        #version 300 es
+        precision highp float;
+        precision highp int;
+        // We'll have to reuse these locations handle numbers
+        // outside of the shader when we pass data to it.
+        // See 'var vertexTexLocation = 4;' below for example.
+        layout(location = 0) in vec2 position;
+        layout(location = 4) in vec2 texture_coordinates;
+        out vec2 v_st;
+        void main() {
+            v_st = texture_coordinates;
+            // we're using orthogonal projection, no need for
+            // perspective. so, we don't even need a model-view
+            // -projection matrix to multiply the position
+            // coordinates by like in standard opengl or 3d
+            // workflows where we're looking at a 3d scene.
+            gl_Position = vec4(position, 0.0, 1.0);
+        }
+    </script>
+
+    <script id="fragment_shader" type="x-shader/x-fragment">
+        #version 300 es
+
+        #define TEST 0
+        #define SHARPEN 1
+        #define GAUSSIAN 2
+        #define BOX 3
+        #define EMBOSS 4
+
+        precision highp float;
+        precision highp int;
+
+        uniform sampler2D diffuse;
+
+        in vec2 v_st;
+        layout(location = 0) out vec4 colour;
+
+        float luminance(vec3 colour) {
+            return 0.2126 * colour.r + 0.7152 * colour.g + 0.0722 * colour.b;
+        }
+
+        void main() {
+
+            float convolution_matrix_x[9] = float[9](
+                -1.0, 0.0, 1.0,
+                -2.0, 0.0, 2.0,
+                -1.0, 0.0, 1.0
+            );
+
+            float convolution_matrix_y[9] = float[9](
+                -1.0, -2.0, -1.0,
+                0.0, 0.0, 0.0,
+                1.0, 2.0, 1.0
+            );
+
+            // upres the size by 2 (* 2) for better sampling results.
+            ivec2 size = textureSize(diffuse, 1) * 2; 
+            vec2 offset = vec2(1.0/float(size.x), 1.0/float(size.y));
+            // 'seeing doubles'
+            // offset.x *= 10.0;
+            // offset.y = 0.0;
+
+            // sample surrounding fragments.
+            vec4 pixels[9] = vec4[9](
+                // top left
+                texture(diffuse, vec2(v_st.s - offset.x, v_st.t - offset.y)),
+                // top
+                texture(diffuse, vec2(v_st.s, v_st.t - offset.y)),
+                // top right
+                texture(diffuse, vec2(v_st.s - offset.x, v_st.t + offset.y)),
+                // left
+                texture(diffuse, vec2(v_st.s - offset.x, v_st.t)),
+                // centre
+                texture(diffuse, v_st),
+                // right
+                texture(diffuse, vec2(v_st.s + offset.x, v_st.t)),
+                // bottom left
+                texture(diffuse, vec2(v_st.s - offset.x, v_st.t + offset.y)),
+                // bottom
+                texture(diffuse, vec2(v_st.s, v_st.t + offset.y)),
+                // bottom right
+                texture(diffuse, vec2(v_st.s + offset.x, v_st.t + offset.y))
+            );
+
+            float x = 0.0;
+            float y = 0.0;
+
+            for (int i = 0; i < pixels.length(); i++) {
+                // for each fragment sampled around the current fragment,
+                // convolve it with the convolution_matrix's value.
+                float lum = luminance(pixels[i].rgb);
+                // interestingly, doing the length() produces some
+                // more pronounced edges.
+                x += lum * convolution_matrix_x[i];
+                y += lum * convolution_matrix_y[i];
+            }
+
+            float magnitude = sqrt(x * x + y * y);
+            colour = vec4(vec3(magnitude), 1.0);
+        }
+    </script>
+
+    <script>
+
+    function init() {
+        'use strict';
+        var canvas = document.createElement('canvas');
+        document.body.appendChild(canvas);
+        var gl = canvas.getContext('webgl2', { antialias: false });
+
+        // this is our shader.
+        var program = createProgram(gl, getShaderSource('vertex_shader'), getShaderSource('fragment_shader'));
+
+        var uniformDiffuseLocation = gl.getUniformLocation(program, "diffuse");
+
+        var vertexPosBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertexPosBuffer);
+        // two triangles so we have some geometry to draw with
+        // in our opengl context.
+        var positions = new Float32Array([
+            -1.0, -1.0,
+             1.0, -1.0,
+             1.0,  1.0,
+             1.0,  1.0,
+            -1.0,  1.0,
+            -1.0, -1.0
+        ]);
+        gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+        var vertexTexBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertexTexBuffer);
+        // the texture coordinates for our triangles' vertex
+        // positions above.
+        var texcoords = new Float32Array([
+             0.0,  1.0,
+             1.0,  1.0,
+             1.0,  0.0,
+             1.0,  0.0,
+             0.0,  0.0,
+             0.0,  1.0
+        ]);
+        gl.bufferData(gl.ARRAY_BUFFER, texcoords, gl.STATIC_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+        var vertexArray = gl.createVertexArray();
+        gl.bindVertexArray(vertexArray);
+
+        // set with GLSL layout qualifier
+        // see the vertex shader above for how
+        // this was defined.
+        var vertexPosLocation = 0;
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertexPosBuffer);
+        gl.vertexAttribPointer(vertexPosLocation, 2, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(vertexPosLocation);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
+        // set with GLSL layout qualifier
+        // see the vertex shader above for how
+        // this was defined.
+        var vertexTexLocation = 4; 
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertexTexBuffer);
+        gl.vertexAttribPointer(vertexTexLocation, 2, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(vertexTexLocation);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+        gl.bindVertexArray(null);
+
+        var imageUrl = '../assets/everest.jpg';
+        var texture = null;
+        var image = null;
+        loadImage(imageUrl, function(img) {
+            image = img;
+            canvas.width = image.naturalWidth;
+            canvas.height = image.naturalHeight;
+            texture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.texImage2D(
+                gl.TEXTURE_2D,
+                0,
+                gl.RGBA,
+                gl.RGBA,
+                gl.UNSIGNED_BYTE,
+                image
+            );
+            gl.generateMipmap(gl.TEXTURE_2D);
+            render(0);
+        });
+        function render(iterations) {
+            // Clear color buffer
+            gl.clearColor(1.0, 0.0, 0.0, 1.0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            // Bind program
+            gl.useProgram(program);
+
+            gl.uniform1i(uniformDiffuseLocation, 0);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.bindVertexArray(vertexArray);
+
+            gl.viewport(0, 0, image.naturalWidth, image.naturalHeight);
+            gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, 1);
+
+            // wip, going to need another render target probably
+            // to store image data to recreate textures between
+            // renders.
+            if (iterations) {
+                render(--iterations);
+            }
+
+            gl.deleteBuffer(vertexPosBuffer);
+            gl.deleteBuffer(vertexTexBuffer);
+            gl.deleteVertexArray(vertexArray);
+            gl.deleteTexture(texture);
+            gl.deleteProgram(program);
+        }
+    }
+
+    init();
+    </script>
+
+</body>
+
+</html>

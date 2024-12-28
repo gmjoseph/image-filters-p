@@ -1,0 +1,228 @@
+<html>
+<head>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+
+function getLuminance(data, idx) {
+    var r = data[idx];
+    var g = data[idx + 1];
+    var b = data[idx + 2];
+    var lum = (0.2126 * r + 0.7152 * g + 0.0722 * b)
+    return lum;
+}
+
+function setLuminance(data, idx, lum) {
+    data[idx] = data[idx + 1] = data[idx + 2] = lum;
+    // always keep alpha at 255.
+    data[idx + 3] = 255;
+}
+
+function setupCanvas(img) {
+    var imgWidth = img.naturalWidth;
+    var imgHeight = img.naturalHeight;
+    var canvas = document.getElementById('canvas');
+    var ctx = canvas.getContext('2d');
+    canvas.width = imgWidth;
+    canvas.height = imgHeight;
+    ctx.drawImage(img, 0, 0);
+}
+
+function makeTargetCanvas(id) {
+    var canvas = document.getElementById('canvas');
+    var ctx = canvas.getContext('2d');
+    var target = document.createElement('canvas');
+    target.id = id;
+    document.body.append(target);
+    target.width = canvas.width;
+    target.height = canvas.height;
+}
+
+function drawFilter(id, convolutionFunction, inputData) {
+    var target = document.getElementById(id);
+    var targetCtx = target.getContext('2d');
+    var targetData = targetCtx.getImageData(0, 0, target.width, target.height)
+
+    // this will be used for column-wise iteration but we need
+    // the value to gauge whether a pixel is on the edge or not.
+    // accounting for alpha means width * rbga datapoints per row
+    var stepsPerRow = target.width * 4;
+
+    // this iterates row-wise (so we'll deal with x-convolution).
+    // this is how we're indexing into the data:
+    // [0][][][][1][][][][2][][][]
+    for (var i = 0; i < inputData.data.length; i += 4) {
+        var convolved = convolvedMatrix(inputData.data, i, stepsPerRow, target.height);
+        var result = convolutionFunction(convolved);
+        setLuminance(targetData.data, i, result);
+    }
+    targetCtx.putImageData(targetData, 0, 0);
+}
+
+function ready(img) {
+    
+    setupCanvas(img);
+    
+    var configs = [
+        { id: 'ox', f: convolveAxisX },
+        { id: 'oy', f: convolveAxisY },
+        // A custom function wrapping x and y's functions together
+        // and returning the output.
+        { id: 'o', f: function(convolved) {
+            var resultX = convolveAxisX(convolved);
+            var resultY = convolveAxisY(convolved);
+            var magnitude = Math.sqrt(resultX * resultX + resultY * resultY);
+            return magnitude;
+        }},
+    ];
+
+    var canvas = document.getElementById('canvas');
+    var ctx = canvas.getContext('2d');
+    var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+    for (var i = 0; i < configs.length; i++) {
+        var id = configs[i].id;
+        var f = configs[i].f;
+        makeTargetCanvas(id);
+        drawFilter(id, f, imgData);
+    }
+}
+
+function convolvedMatrix(data, idx, stepsPerRow, height) {
+    // we need 9 brightness values around and including
+    // the brightness value at data[idx]. here we'll
+    // make sure to handle edges (top, right, bottom, left)
+    // by duplicating the value from the centre pixel
+    // we'll then return our 3x3 matrix targeted
+    // for convolution.
+    var isLeft = 0 === idx % stepsPerRow;
+    var isTop = idx < stepsPerRow;
+    // because we jump an additional 4 to get to
+    // the next row when we're at the righthandmost pixel.
+    var isRight = stepsPerRow - 4 === idx % stepsPerRow;
+    // height - 1 let's us target the last row of the image.
+    var isBottom = idx >= stepsPerRow * (height - 4);
+
+    // we need to apply an extension strategy to edge pixels:
+    // https://en.wikipedia.org/wiki/Kernel_(image_processing)#Edge_Handling
+
+    // we use row-major ordering
+    var m = new Array(9);
+    var isCorner = ((isLeft && isTop) ||
+                    (isLeft && isBottom) ||
+                    (isRight && isTop) ||
+                    (isRight && isBottom))
+    var lum = getLuminance(data, idx)
+
+    // top + bottom jump an entire row back/forward.
+    var idxMapping = {
+        top: idx - stepsPerRow, 
+        right: idx + 4,
+        bottom: idx + stepsPerRow,
+        left: idx - 4,
+        topRight: (idx - stepsPerRow) + 4, 
+        bottomRight: (idx + stepsPerRow) + 4,
+        bottomLeft: (idx + stepsPerRow) - 4,
+        topLeft: (idx - stepsPerRow) - 4, 
+    };
+
+    // if its in a corner, just stretch out the value
+    // of the pixel in all directions. otherwise we can
+    // stretch out other edge pixels in the direction
+    // that isn't contained within the image.
+    // see the edge handling link on wikipedia above.
+    if (isCorner) {
+        // we have no other pixels to draw on in these cases
+        // so we can populate them with the same luminance from
+        // the corner pixel.
+        // console.log("corner", idx);
+        m.fill(lum);
+    } else if (isLeft) {
+        // console.log("left ", idx);
+        m[0] = m[1] = m[2] = getLuminance(data, idxMapping.top);
+        m[3] = m[4] = m[5] = lum;
+        m[6] = m[7] = m[8] = getLuminance(data, idxMapping.bottom);
+    } else if (isTop) {
+        // console.log("top", idx);
+        m[0] = m[3] = m[6] = getLuminance(data, idxMapping.left);
+        m[1] = m[4] = m[7] = lum;
+        m[2] = m[5] = m[8] = getLuminance(data, idxMapping.right);
+    } else if (isRight) {
+        // console.log("right ", idx);
+        m[0] = m[1] = m[2] = getLuminance(data, idxMapping.top);
+        m[3] = m[4] = m[5] = lum;
+        m[6] = m[7] = m[8] = getLuminance(data, idxMapping.bottom);
+    } else if (isBottom) {
+        // console.log("bottom", idx);
+        m[0] = m[3] = m[6] = getLuminance(data, idxMapping.left);
+        m[1] = m[4] = m[7] = lum;
+        m[2] = m[5] = m[8] = getLuminance(data, idxMapping.right);
+    } else {
+        m[0] = getLuminance(data, idxMapping.topLeft);
+        m[1] = getLuminance(data, idxMapping.top);
+        m[2] = getLuminance(data, idxMapping.topRight);
+        m[3] = getLuminance(data, idxMapping.left);
+        m[4] = lum;
+        m[5] = getLuminance(data, idxMapping.right);
+        m[6] = getLuminance(data, idxMapping.bottomLeft);
+        m[7] = getLuminance(data, idxMapping.bottom);
+        m[8] = getLuminance(data, idxMapping.bottomRight);
+    }
+    return m;
+}
+
+function convolveAxisX(matrix) {
+    // https://en.wikipedia.org/wiki/Kernel_(image_processing)#Convolution
+    // https://en.wikipedia.org/wiki/Sobel_operator#Formulation
+    var gx = [
+        -1, 0, 1,
+        -2, 0, 2,
+        -1, 0, 1
+    ];
+    // gx = [
+    //     -3, 0, 3,
+    //     -10, 0, 10,
+    //     -3, 0, 3
+    // ];
+    var a = 0;
+    for (var i = 0; i < gx.length; i++) {
+        var value = gx[i];
+        a += (value * matrix[i]);
+    }
+    return a;
+}
+
+function convolveAxisY(matrix) {
+    // https://en.wikipedia.org/wiki/Kernel_(image_processing)#Convolution
+    // https://en.wikipedia.org/wiki/Sobel_operator#Formulation
+    var gy = [
+        -1, -2, -1,
+        0, 0, 0,
+        1, 2, 1
+    ];
+    // gy = [
+    //     -3, -10, -3,
+    //     0, 0, 0,
+    //     3, 10, 3
+    // ];
+    var a = 0;
+    for (var i = 0; i < gy.length; i++) {
+        var value = gy[i];
+        a += (value * matrix[i]);
+    }
+    return a;
+}
+
+var img = new Image();
+img.onload = function() {
+    ready(img);
+};
+
+// img.src = '../images/leaf.jpg';
+img.src = '../images/everest.jpg';
+// img.src = '../images/valve.png';
+
+</script>
+</body>
+</html>
